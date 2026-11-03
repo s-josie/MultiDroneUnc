@@ -37,15 +37,28 @@ class MyPlanner: #MCTS style planner
     def __init__(self, env: MultiDroneUnc, c: float = 1.0, max_rollout_steps: int = 25): #TODO tune hyper-parameters
         self.env = env
         self.c = c #exploration v. exploitation constant for UCB
-        self.max_rollout_steps = self.max_rollout_steps
+        self.max_rollout_steps = max_rollout_steps
         self.discount_factor = env.get_config().discount_factor
         self.num_actions = env.num_actions #number of possible actions
 
     def plan(self, current_state: np.ndarray, planning_time_per_step: float) -> int:
        
-       #check if initial state is terminal (end case) TODO
+        #check if initial state is terminal (end case):
+        position = current_state[:, :3].astype(np.int32) #current positions of drones
 
-        root = MCTSNode(state= current_state, )
+        reached = current_state[:, 3].astype(bool) #terminal state where goal is reached
+
+        #drone + drone collisions (still include reached drones as solid)
+        _, counts = np.unique(position, axis=0, return_counts=True)
+        veh_collisions = int(counts[counts > 1].sum())
+
+        #drone + obstacle collisions
+        obstacles_hit = self.env.obstacles[position[:, 0], position[:, 1], position[:, 2]]
+        obstacle_collisions = int(obstacles_hit.sum())
+        
+        done = reached.all() or (obstacle_collisions > 0) or (veh_collisions > 0)
+
+        root = MCTSNode(state= current_state, done= bool(done))
 
         #initialise start time and number of iterations
         start_time = time.time()
@@ -55,6 +68,9 @@ class MyPlanner: #MCTS style planner
 
             #selection
             node = self._node_selection(root)
+
+            if node.done: #node selected is a terminla state
+                break
 
             #simulation
             reward_sum = self._simulate(node)
@@ -86,26 +102,31 @@ class MyPlanner: #MCTS style planner
                 if node.children == {}: #edge case: no children and no untried actions, so cannot expand
                     return node
 
-            #select child using UCB 
-            best_ucb_score = -np.inf #initialise score
-            best_child = None #initialise best_child
+                node = self.best_child_ucb(node)
+    
+            return node #if no better child was found don't select a child and expand further
 
-            parent_node_visit_count = max(1, node.visit_count) #take max to prevent log(0)=undefined errors
+    def best_child_ucb(self, node:MCTSNode) -> MCTSNode:
+                    
+        #select child using UCB 
+        best_ucb_score = -np.inf #initialise score
+        best_child = None #initialise best_child
 
-            for child in node.children.values(): 
-                if child.visit_count == 0: # no info about child, so set score high so its explored
-                    ucb_score = np.inf
-                else:
-                    exploitation = child.q_value
-                    exploration = self.c * math.sqrt((math.log(parent_node_visit_count))/child.visit_count) #c*\sqrt(\frac{N(s)}{N(s,a)})
-                    ucb_score = exploration + exploitation
+        parent_node_visit_count = max(1, node.visit_count) #take max to prevent log(0)=undefined errors
 
-                    if ucb_score > best_ucb_score:
-                        best_ucb_score = ucb_score #update best score
-                        best_child = child #update best child node 
+        for child in node.children.values(): 
+            if child.visit_count == 0: # no info about child, so set score high so its explored
+                ucb_score = np.inf
+            else:
+                exploitation = child.q_value
+                exploration = self.c * math.sqrt((math.log(parent_node_visit_count))/child.visit_count) #c*\sqrt(\frac{N(s)}{N(s,a)})
+                ucb_score = exploration + exploitation
 
+                if ucb_score > best_ucb_score:
+                    best_ucb_score = ucb_score #update best score
+                    best_child = child #update best child node 
 
-            return best_child if best_child != None else node #if no better child was found don't select a child and expand further
+        return best_child if best_child != None else node
     
     def _simulate(self, node: MCTSNode) -> float:
         """
@@ -161,7 +182,7 @@ class MyPlanner: #MCTS style planner
         for i in range(self.env.N): #for each drone
 
             if reached[i]: #drone has already reached its goal
-                chosen_moves[i] = 0 #TODO does 0 int represent no move?
+                chosen_moves[i] = 0 #arbitrary move since it won't actually be applied TODO
                 continue #find action for next drone
 
             drone_position = positions[i]
@@ -179,17 +200,26 @@ class MyPlanner: #MCTS style planner
 
                     #check if action causes a collision with obstacles:
                     if self.env.obstacles[tuple(next_pos)]:
-                        continue #skip this action since it causes a collision with 1+ obstacles
+                        continue #skip this action since it causes a collision with 1+ obstacle(s)
 
-                    #TODO check if action causes a collision between drones
+                    #check if action causes a collision between drones
 
-                #find distance to goal, distance to obstacle
-                dist = np.linalg.norm(next_pos, goal_position) #distance from next_pos and the relevant goal
+                    #drone + drone collisions (still include reached drones as solid)
+                    _, counts = np.unique(next_pos, axis=0, return_counts=True)
+                    veh_collisions = int(counts[counts > 1].sum())
 
-            
-                if dist < min_dist: #new best dist is found
-                    min_dist = dist 
-                    best_action = action_index
+                    if veh_collisions > 0:
+                        continue #skip this action since it causes a collision between drones
+                            
+
+                    #find distance to goal, distance to obstacle
+                    goal_dist = np.linalg.norm(next_pos - goal_position) #distance from next_pos and the relevant goal
+
+                    #obs_dist = self.env.dist_field
+
+                    if goal_dist < min_dist: #new best dist is found
+                        min_dist = goal_dist 
+                        best_action = action_index
 
             chosen_moves[i] = best_action
 
@@ -232,8 +262,8 @@ class MyPlanner: #MCTS style planner
         #create a child node from the information provided from the simulation
         child = MCTSNode(state=next_state, parent = node, parent_action=action, done=done, info=info)
 
-        child.total_reward = reward
-        child.visit_count = 1 #does it matter if this child was visited via. another branch in the tree? or is it distinct given its parents?
+        child.total_reward = 0.0
+        child.visit_count = 0 #does it matter if this child was visited via. another branch in the tree? or is it distinct given its parents?
         node.children[action] = child
 
         return child

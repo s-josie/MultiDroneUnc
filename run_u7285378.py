@@ -1,9 +1,6 @@
 from multi_drone import MultiDroneUnc
-import numpy as np
-from typing import Optional, Tuple, Dict, List
-import math
-from multi_drone import MultiDroneUnc
 from MyPlanner import MyPlanner
+import argparse
 
 
 parser = argparse.ArgumentParser()
@@ -19,7 +16,7 @@ def run(env, planner, planning_time_per_step=1.0):
 
     while True:
         # Use MCTS to plan an action from the current state
-        action = MyPlanner.plan(current_state, planning_time_per_step)
+        action = planner.plan(current_state, planning_time_per_step)
 
         # Apply the action to the environment
         next_state, reward, done, info = env.step(action)        
@@ -43,7 +40,7 @@ def run(env, planner, planning_time_per_step=1.0):
 env = MultiDroneUnc(args.config)
 
 # Instantiate the planner
-planner = MyPlanner(env, a_param=1.0, b_param=2)
+planner = MyPlanner(env, c=1.41, max_rollout_steps=25)
 
 # Run the planning loop
 total_discounted_reward, history = run(env, planner, planning_time_per_step=1.0)

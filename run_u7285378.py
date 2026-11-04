@@ -7,7 +7,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--config', type=str, required=True, help="Path to the yaml configuration file")
 args = parser.parse_args()
 
-def run(env, planner, planning_time_per_step=1.0):
+def run(env, planner, planning_time_per_step=10.0):
     # Set the simulator to the initial state
     current_state = env.reset()
     num_steps = 0
@@ -40,9 +40,9 @@ def run(env, planner, planning_time_per_step=1.0):
 env = MultiDroneUnc(args.config)
 
 # Instantiate the planner
-planner = MyPlanner(env, c=1.41, max_rollout_steps=25)
+planner = MyPlanner(env, c=1.41, max_rollout_steps=50)
 
 # Run the planning loop
-total_discounted_reward, history = run(env, planner, planning_time_per_step=1.0)
+total_discounted_reward, history = run(env, planner, planning_time_per_step=10.0)
 print(f"success: {history[-1][5]['success']}, Total discounted reward: {total_discounted_reward}")
 env.show()

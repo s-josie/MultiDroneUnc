@@ -40,7 +40,7 @@ def run(env, planner, planning_time_per_step=10.0):
 env = MultiDroneUnc(args.config)
 
 # Instantiate the planner
-planner = MyPlanner(env, c=1.41, max_rollout_steps=50, top_k=26)
+planner = MyPlanner(env, c=1.41, max_rollout_steps=50)
 
 # Run the planning loop
 total_discounted_reward, history = run(env, planner, planning_time_per_step=10.0)

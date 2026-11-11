@@ -7,12 +7,26 @@ import time
 import random
 from copy import deepcopy
 import itertools
+from dataclasses import dataclass, field
 
 #online policy: MCTS
 #simulation step already implemented and provided for usage
 #expand using step from multi_drone.py
 
-class MCTSNode:
+class Action_Stats:
+    #allows us to reason about the non-determinisitic effects of actions
+
+    action: int
+    visits : int = 0 #initialise with 0 visits
+    total_return: float = 0.0 #initialise
+
+    possible_outcomes: Dict[Tuple[int, ...]], "State_Node"] = field(default_factory = dict)
+
+    @property
+    def mean_return(self) -> float: #mean return over possible stochastic actions of outcomes
+        return self.total_return/self.visits if self.visits else 0.0 #avoid division by zero if action, state pair hasn't been visited
+    
+class State_Node:
     def __init__(self, env: MultiDroneUnc, state: np.ndarray, parent: Optional["MCTSNode"] = None, parent_action: Optional[int] = None, done: bool = False, info: Optional[Dict]=None):
         self.env = env
         self.state = state #current state
@@ -25,8 +39,7 @@ class MCTSNode:
         self.visit_count = 0 #initial number of visits = 0 
         self.total_reward = 0.0 #initial total reward is 0
 
-        self._untried_actions: list = random.sample(list(range(self.env.num_actions)), k=len(list(range(self.env.num_actions))))
-
+        self._untried_actions: list = [] #initialise, this is populated with the top-k ranked actions later
     @property
     def q_value(self) -> float: #average total reward 
         if self.visit_count == 0: #no information about this node yet
@@ -61,7 +74,7 @@ class MyPlanner: #MCTS style planner
         
         done = reached.all() or (obstacle_collisions > 0) or (veh_collisions > 0)
 
-        root = MCTSNode(env = self.env, state= current_state, done= bool(done))
+        node = MCTSNode(env = self.env, state= current_state, done= bool(done))
 
         #initialise start time and number of iterations
         start_time = time.time()
@@ -70,7 +83,7 @@ class MyPlanner: #MCTS style planner
         while time.time() - start_time < planning_time_per_step: #enforcing max planning time per step
 
             #selection
-            node = self._node_selection(root)
+            node = self._node_selection(node)
 
             if node.done: #node selected is a terminla state
                 break
@@ -103,7 +116,7 @@ class MyPlanner: #MCTS style planner
                 if len(node._untried_actions) > 0:
                     return self._expand(node) #still have actions to try so we expand the node
                 else:
-                    return self.best_child_ucb(node) #all children added, so we can choose the best child
+                    node = self.best_child_ucb(node) #all children added, so we can choose the best child
     
             return node #node is terminal so we don't select a child or expand further
 
@@ -137,6 +150,7 @@ class MyPlanner: #MCTS style planner
             #initialise info about this action before we assess it per drone
             joint_score = 0.0
             action_is_valid = True
+
             for i in range(self.env.N): #for each drone
 
                 if reached[i]:
@@ -156,10 +170,8 @@ class MyPlanner: #MCTS style planner
     
                 obs_dist = self.env.dist_field[next_pos[0], next_pos[1], next_pos[2]]
                 
-                obs_proximity_penalty = 0.0
-                if obs_dist <= 1.0: #if a drone is close to an obstacle
-                    obs_proximity_penalty = 1.0 #grows rapidly if very close to obstacle
-
+                obs_proximity_penalty = (1 - obs_dist / (obs_dist + self.env.get_config().alpha)) #failure probability of action
+                
                 #find distance to goal, distance to obstacle
                 goal_dist = np.linalg.norm(next_pos - self.env.goals[i]) #distance from next_pos and the relevant goal
 
@@ -190,6 +202,7 @@ class MyPlanner: #MCTS style planner
         for child in node.children.values(): 
             if child.visit_count == 0: # no info about child, so set score high so its explored
                 ucb_score = np.inf
+                best_child = child
             else:
                 exploitation = child.q_value
                 exploration = self.c * math.sqrt((math.log(parent_node_visit_count))/child.visit_count) #c*\sqrt(\frac{N(s)}{N(s,a)})
@@ -214,9 +227,10 @@ class MyPlanner: #MCTS style planner
         total_discounted_reward = 0.0 #initialise 
         discount_factor = 1.0 #simulated reward of immediate next state is not discounted
 
+        
         for step in range(self.max_rollout_steps): #rollout to max steps forward, limit computational time per simulation
             
-            action = self.heuristic_action_selection(node) #select action with heuristic
+            action = self.heuristic_action_selection(current_state) #select action with heuristic
             next_state, reward, done, _ = self.env.simulate(current_state, action)
 
             total_discounted_reward += discount_factor * reward #add discounted reward from step forward
@@ -225,21 +239,20 @@ class MyPlanner: #MCTS style planner
 
             current_state = next_state #update current_state for next iteration
 
-            if done: #next_state is terminal so no need for further rollout
-                break 
+            if done: #next_state is terminal so no need for further rollout, return current reward val found
+                return total_discounted_reward
+                
 
 
         return total_discounted_reward #estimated value of input node based on simulated future states
 
 
 
-    def heuristic_action_selection(self, node: MCTSNode):
+    def heuristic_action_selection(self, state: np.ndarray):
         """
         Selects actions that move drones towards their goals/ greedy action choice.
         Small penalty if drone is close to obstacels (since this increases the chance of an action failing, and a collision occuring.)
         """
-
-        state = node.state
 
         #bounds of env
         max_X, max_Y, max_Z = self.env.cfg.grid_size
@@ -280,16 +293,18 @@ class MyPlanner: #MCTS style planner
                         continue #skip this action since it causes a collision between drones
                             
                     #find distance to goal, distance to obstacle
-                    goal_dist = np.linalg.norm(next_pos - goal_positions) #distance from next_pos and the relevant goal
+                    goal_dist = np.linalg.norm(next_pos - goal_positions[i]) #distance from next_pos and the relevant goal
 
                     obs_dist = self.env.dist_field[next_pos[0], next_pos[1], next_pos[2]]
                     
-                    obs_proximity_penalty = 0.0
+                    """obs_proximity_penalty = 0.0
                     if obs_dist < 1.0: #if a drone is close to an obstacle
                         obs_proximity_penalty = 1.0 #grows rapidly if very close to obstacle
-
+"""
+                    obs_proximity_penalty = (1 - obs_dist / (obs_dist + self.env.get_config().alpha)) #failure probability of action
+                                    
                     score = goal_dist + 0.5*obs_proximity_penalty #want to minimise this
-                    print(f"score {score}; best score: {best_score}")
+                    #print(f"score {score}; best score: {best_score}")
                     if score < best_score: #new best dist is found
                         best_score = score
                         best_action = action_index

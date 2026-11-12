@@ -9,9 +9,9 @@ goal_positions: # The goal positions for each drone
 
 obstacle_cells: # The list of cells inside the grid that are considered obstacles
   - [5, 4, 2]
-  - [5, 3, 2]
+  #- [5, 3, 2]
 
-change_altitude: True # Only operate in the XY-plane
+change_altitude: False # Only operate in the XY-plane
 
 # MDP model parameters
 step_cost: -1.0

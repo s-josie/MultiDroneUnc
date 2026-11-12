@@ -1,12 +1,9 @@
-from multi_drone import MultiDroneUnc, _make_action_vectors
+from multi_drone import MultiDroneUnc
 import numpy as np
 from typing import Optional, Tuple, Dict, List
 import math
 from multi_drone import MultiDroneUnc
 from time import perf_counter
-import random
-from copy import deepcopy
-import itertools
 from dataclasses import dataclass, field
 
 #online policy: MCTS
@@ -35,16 +32,18 @@ class State_Node:
 
 
 class MyPlanner: #MCTS style planner
-    def __init__(self, env: MultiDroneUnc, c: float = 1.4, max_rollout_steps: int = 25, max_actions_per_state: int = 64, max_tree_depth: int = 50): #TODO tune hyper-parameters
+    def __init__(self, env: MultiDroneUnc, c: float = 1.4, max_rollout_steps: int = 25, max_actions_per_state: int = 64, max_tree_depth: int = 50, rollout_policy: str = "random"): #TODO tune hyper-parameters
         self.env = env
         self.c = c #exploration v. exploitation constant for UCB
         self.max_rollout_steps = max_rollout_steps
         self.max_actions_per_state = max_actions_per_state #limits joint actions assessed per state to limit tree branching
         self.max_tree_depth = max_tree_depth
+        self.rollout_policy = rollout_policy
         self.discount_factor = env.get_config().discount_factor
         seed = self.env.cfg.seed #fixed seed for experiments
         self.rng = np.random.default_rng(seed=seed)
-
+        self.last_stats = {}
+        
 
     def plan(self, current_state: np.ndarray, planning_time_per_step: float):
         start_time = perf_counter()
@@ -55,13 +54,16 @@ class MyPlanner: #MCTS style planner
         if root_node.done: #edge case: root node is terminal
             return 0 #return dummy action (that won't ever be executed)
 
-        while perf_counter() < planning_time_per_step: #run MCTS while there is time, MCTS is an anytime algorithm so we are guaranteed a solution when time runs out
+        while perf_counter() - start_time < planning_time_per_step: #run MCTS while there is time, MCTS is an anytime algorithm so we are guaranteed a solution when time runs out
             self.MCTS_iteration(root_node)
             iterations += 1
 
         #choose action with most visits, if there is a tie choose the higher q value
         selected_action = max(root_node.actions.values(), key=lambda a: (a.visit_count, a.mean_q_value))
-        
+
+        self.last_stats = {"elapsed_time": perf_counter() - start_time,
+                           "iterations": iterations}
+
         return selected_action.action
 
         
@@ -71,12 +73,11 @@ class MyPlanner: #MCTS style planner
 
         root.visit_count += 1 #each MCTS iteration means we visit the root once more
         path = [] #initialise path explored
-        depth = 0 #record depth so we can limit depth of search
 
-        for _ in range(self.max_tree_depth):
+        for _ in range(self.max_tree_depth): #limit depth of search for computational efficiency
 
             if node.done: #node is terminal state
-                leaf_return = 0.0 #return value of terminal state 
+                leaf_reward = 0.0 #return value of terminal state 
                 break
 
             #1. Selection: Select an action to perform
@@ -85,15 +86,15 @@ class MyPlanner: #MCTS style planner
             #2. Expansion:
             next_state, reward, done, info = self.env.simulate(node.state, action = action_stats.action)
             path.append((node, action_stats, reward))
-            depth += 1
 
-            outcome_key = self.assign_state_key(next_state) #get dictionary key for next_state
+            outcome_key = (self.assign_state_key(next_state), done) #get dictionary key for next_state, include done to distinguish between states that were reverted due to a drone collision
             child = action_stats.possible_outcomes.get(outcome_key) #check if next_state has been observed as a possible outcome of the selected action before
 
             if child is None: #the observed outcome from the selected action has not been seen before
-                child = self.make_state_node(state=next_state, done = self.is_terminal(next_state))
-                action_stats.possible_outcomes[outcome_key] = child #add child to observed outcomes for next_state
+                child = self.make_state_node(state=next_state, done = done)
                 child.visit_count += 1
+                action_stats.possible_outcomes[outcome_key] = child #add child to observed outcomes for next_state
+
 
                 #3. Simulation: estimate value of next state with rollout
                 leaf_reward = self.simulate(child.state, child.done) #rollout 
@@ -126,7 +127,7 @@ class MyPlanner: #MCTS style planner
             return True #state is terminal
 
         #check if any drones have collided with obstacles
-        if np.any(self.env.obstacles[tuple(drone_positions)]):
+        if np.any(self.env.obstacles[drone_positions[:,0], drone_positions[:,1], drone_positions[:,2]]):
             return True #state is terminal
 
         #check if drones have collided with each other
@@ -142,7 +143,7 @@ class MyPlanner: #MCTS style planner
 
         return False #passed all terminal state checks so state isn't terminal
 
-    def get_candidate_joint_actions(self) -> List[int]:
+    def get_candidate_joint_actions(self, state: np.ndarray) -> List[int]:
         """
         Generate a subset of all possible actions to limit tree branching. 
         """
@@ -151,16 +152,27 @@ class MyPlanner: #MCTS style planner
         if total_possible_actions <= self.max_actions_per_state: #number of actions is below limit on number of actions to consider
             return list(range(total_possible_actions)) #return all possible actions
 
+        reached = state[:,3].astype(bool) #boolean for each drone, indicating if it has reached the goal or not
+
+        #the number of actions is impacted by how many drones have reached their goals (since those drones don't move)
+        num_active_drones = len(np.flatnonzero(~reached)) #count drones that haven't reached their goals yet, and are thus still moveable
+        num_individual_actions = self.env._action_vectors.shape[0]
+        effective_action_count = num_active_drones * num_individual_actions #number of valid actions, given the number of drones at their goal already
+
         candidates = set() #use list so duplicates aren't accidentally added
-        while len(candidates) < self.max_actions_per_state:
+        while len(candidates) < min(self.max_actions_per_state, effective_action_count): #to avoid endless loop, aim to get minimum of avaliable actions (given drones at goals) and the target number
             individual_actions = self.rng.integers(low=0, high= self.env._action_vectors.shape[0], size= self.env.N) #get random, per-drone actions
+
+            individual_actions[reached] = 0 #set 0 action for drones that have already reached their goals. This prevents effective duplicate actions from being added to candidate set.
+
             joint_action = self.env._encode_action(individual_actions) #make joint action for all drones
+
             candidates.add(joint_action)
 
         return list(candidates) #return list of candidate actions
 
     def make_state_node(self, state:np.ndarray, done:bool) -> State_Node:
-        candidate_actions = [] if done else self.get_candidate_joint_actions()
+        candidate_actions = [] if done else self.get_candidate_joint_actions(state)
         actions = {a: Action_Stats(action=a) for a in candidate_actions}
         return State_Node(state=state.copy(), done = done, actions = actions)
     
@@ -175,10 +187,10 @@ class MyPlanner: #MCTS style planner
     def action_selection(self, node: State_Node) -> Action_Stats:
         """Select an unvisited/unused action. If no unvisited nodes use UCB."""
 
-        unvisited_actions = [Action_Stats(a) for a in node.actions if Action_Stats(a).visit_count == 0]
+        unvisited_actions = [action_stats for action_stats in node.actions.values() if action_stats.visit_count == 0]
 
         if unvisited_actions: #still haven't explored all actions
-            return unvisited_actions.pop(self.rng.integers(len(unvisited_actions))) #random unvisited action
+            return unvisited_actions[self.rng.integers(len(unvisited_actions))]
         else: 
             return self.best_ucb_action(node)
 
@@ -200,7 +212,9 @@ class MyPlanner: #MCTS style planner
                     best_ucb_score = ucb_score #update best score
                     best_action = action_stat #update best child node 
 
-        return best_action if best_action != None else Action_Stats(1) #give fallback action if optimisation with ucb fails
+        if best_action is None:
+            raise RuntimeError("No avaliable actions for UCB Selection.")
+        return best_action
 
 
     def simulate(self, state: np.ndarray, done: bool) -> float:
@@ -218,8 +232,13 @@ class MyPlanner: #MCTS style planner
 
         
         for _ in range(self.max_rollout_steps): #rollout to max steps forward, limit computational time per simulation
+
+            if self.rollout_policy == "goal":
+                break #TODO implement
+                #action_int = self.get_goal_oriented_joint_action(current_state)
+            else:
+                action_int = self.random_joint_action() #select action randomly
             
-            action_int = self.random_joint_action() #select action randomly
             next_state, reward, terminal, info = self.env.simulate(current_state, action_int)
 
             total_discounted_reward += discount_factor * reward #add discounted reward from step forward
@@ -233,10 +252,12 @@ class MyPlanner: #MCTS style planner
                 
         return total_discounted_reward #estimated value of input node based on simulated future states
 
+    """def get_goal_oriented_joint_action(self, state: np.ndarray) -> int: TODO
+
+        return action_int"""
 
     def random_joint_action(self) -> int:
 
-        print(f"action vec shape: {self.env._action_vectors.shape}")
         num_actions = self.env._action_vectors.shape[0]
         action_int_array = self.rng.integers(low = 0, high =num_actions, size = self.env.N)
 
@@ -252,9 +273,11 @@ class MyPlanner: #MCTS style planner
 
         for _, action_stat, immediate_reward in reversed(traversed_path): #moving up the traversed path
 
+            downstream_reward = immediate_reward + self.discount_factor * downstream_reward
+            
             action_stat.visit_count += 1
-            action_stat.total_reward += immediate_reward + self.discount_factor * downstream_reward
-
+            action_stat.total_reward += downstream_reward
+            
         return None
 
     

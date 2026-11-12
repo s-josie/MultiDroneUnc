@@ -1,0 +1,17 @@
+grid_size: [5, 5, 1] # Grid dimensions (x, y, z)
+start_positions: # Start position for each drone
+  - [0, 0, 0]
+goal_positions: # Goal position for each drone
+  - [4, 4, 0]
+obstacle_cells: # Obstacle cell coordinates
+  - [1, 1, 0]
+  - [3, 3, 0]
+change_altitude: False
+
+# MDP model parameters (identical in every environment)
+step_cost: -1.0
+collision_penalty: -50.0
+goal_reward: 100.0
+discount_factor: 0.98
+max_num_steps: 100
+alpha: 0.5

@@ -1,6 +1,7 @@
 from multi_drone import MultiDroneUnc
 from MyPlanner import MyPlanner
 import argparse
+import time
 
 
 parser = argparse.ArgumentParser()
@@ -40,9 +41,12 @@ def run(env, planner, planning_time_per_step=10.0):
 env = MultiDroneUnc(args.config)
 
 # Instantiate the planner
-planner = MyPlanner(env, c=1.41, max_rollout_steps=50)
+planner = MyPlanner(env, c=1.41, max_rollout_steps=50, max_tree_depth=100, rollout_policy="random")
 
+start_time = time.time()
 # Run the planning loop
 total_discounted_reward, history = run(env, planner, planning_time_per_step=10.0)
 print(f"success: {history[-1][5]['success']}, Total discounted reward: {total_discounted_reward}")
+print(planner.last_stats)
+print(f"Total time: {time.time() - start_time}")
 env.show()

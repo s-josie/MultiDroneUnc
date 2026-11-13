@@ -41,7 +41,7 @@ def run(env, planner, planning_time_per_step=10.0):
 env = MultiDroneUnc(args.config)
 
 # Instantiate the planner
-planner = MyPlanner(env, c=1.41, max_rollout_steps=50, max_tree_depth=100, rollout_policy="random")
+planner = MyPlanner(env, c=1.41, max_rollout_steps=50, max_actions_per_state=64, max_tree_depth=100)
 
 start_time = time.time()
 # Run the planning loop
